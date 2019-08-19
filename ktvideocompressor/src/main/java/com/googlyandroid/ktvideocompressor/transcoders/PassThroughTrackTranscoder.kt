@@ -35,28 +35,36 @@ class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
   }
 
   override fun stepPipeline(): Boolean {
-    if (mIsEOS) return false
-    val trackIndex = mediaExtractor.sampleTrackIndex
-    if (trackIndex < 0) {
-      mBuffer.clear()
-      mBufferInfo.set(0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-      queuedMuxer.writeSampleData(sampleType, mBuffer, mBufferInfo)
-      mIsEOS = true
-      return true
+    when {
+      mIsEOS -> return false
+      else -> {
+        val trackIndex = mediaExtractor.sampleTrackIndex
+        when {
+          trackIndex < 0 -> {
+            mBuffer.clear()
+            mBufferInfo.set(0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            queuedMuxer.writeSampleData(sampleType, mBuffer, mBufferInfo)
+            mIsEOS = true
+            return true
+          }
+          trackIndex != mVideoTrackIndex -> return false
+          else -> {
+            mBuffer.clear()
+            val sampleSize = mediaExtractor.readSampleData(mBuffer, 0)
+            assert(sampleSize <= bufferSize)
+            val isKeyFrame = mediaExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+            val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0
+            mBufferInfo.set(0, sampleSize, mediaExtractor.sampleTime, flags)
+            queuedMuxer.writeSampleData(sampleType, mBuffer, mBufferInfo)
+            mWrittenPresentationTimeUs = mBufferInfo.presentationTimeUs
+            mediaExtractor.advance()
+            return true
+          }
+        }
+
+      }
     }
-    if (trackIndex != mVideoTrackIndex) return false
 
-    mBuffer.clear()
-    val sampleSize = mediaExtractor.readSampleData(mBuffer, 0)
-    assert(sampleSize <= bufferSize)
-    val isKeyFrame = mediaExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
-    val flags = if (isKeyFrame) MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0
-    mBufferInfo.set(0, sampleSize, mediaExtractor.sampleTime, flags)
-    queuedMuxer.writeSampleData(sampleType, mBuffer, mBufferInfo)
-    mWrittenPresentationTimeUs = mBufferInfo.presentationTimeUs
-
-    mediaExtractor.advance()
-    return true
   }
 
   override fun getWrittenPresentationTimeUS(): Long {
