@@ -13,13 +13,17 @@ class AudioChannel(decoder: MediaCodec,
     private val encoder: MediaCodec,
     private val audioOutputFormat: MediaFormat) {
 
+  companion object {
+    const val BUFFER_INDEX_END_OF_STREAM = -1
+
+  }
+
   private class AudioBuffer {
     internal var bufferIndex: Int = 0
     internal var presentationTimeUs: Long = 0
     internal var data: ShortBuffer? = null
   }
 
-  val BUFFER_INDEX_END_OF_STREAM = -1
 
   private val BYTES_PER_SHORT = 2
   private val MICROSECS_PER_SEC: Long = 1000000
@@ -33,17 +37,13 @@ class AudioChannel(decoder: MediaCodec,
 
   private var mRemixer: AudioRemixer? = null
 
-  private var mDecoderBuffers: MediaCodecBufferCompatWrapper? = null
-  private var mEncoderBuffers: MediaCodecBufferCompatWrapper? = null
+  private val mDecoderBuffers = MediaCodecBufferCompatWrapper(decoder)
+  private val mEncoderBuffers = MediaCodecBufferCompatWrapper(encoder)
 
   private val mOverflowBuffer = AudioBuffer()
 
   private var mActualDecodedFormat: MediaFormat? = null
 
-  init {
-    mDecoderBuffers = MediaCodecBufferCompatWrapper(decoder)
-    mEncoderBuffers = MediaCodecBufferCompatWrapper(encoder)
-  }
 
   @Throws(UnsupportedOperationException::class)
   fun setActualDecodedFormat(decodedFormat: MediaFormat) {
@@ -135,7 +135,7 @@ class AudioChannel(decoder: MediaCodec,
         }
 
         //Drain overflow first
-        val outBuffer = mEncoderBuffers?.getInputBuffer(encoderInBuffIndex)?.asShortBuffer()
+        val outBuffer = mEncoderBuffers.getInputBuffer(encoderInBuffIndex)?.asShortBuffer()
 
         return when {
           hasOverflow -> {
