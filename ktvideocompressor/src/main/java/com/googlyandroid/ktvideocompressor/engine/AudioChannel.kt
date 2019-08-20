@@ -9,24 +9,15 @@ import java.nio.ShortBuffer
 import java.util.*
 
 
-class AudioChannel(decoder: MediaCodec,
-    private val encoder: MediaCodec,
-    private val audioOutputFormat: MediaFormat) {
-
-  companion object {
-    const val BUFFER_INDEX_END_OF_STREAM = -1
-
-  }
-
-  private class AudioBuffer {
-    internal var bufferIndex: Int = 0
-    internal var presentationTimeUs: Long = 0
-    internal var data: ShortBuffer? = null
-  }
-
-
-  private val BYTES_PER_SHORT = 2
-  private val MICROSECS_PER_SEC: Long = 1000000
+/**
+ * Channel of raw audio from decoder to encoder.
+ * Performs the necessary conversion between different input & output audio formats.
+ *
+ * We currently support upmixing from mono to stereo & downmixing from stereo to mono.
+ * Sample rate conversion is not supported yet.
+ */
+internal class AudioChannel(private val mDecoder: MediaCodec,
+    private val mEncoder: MediaCodec, private val mEncodeFormat: MediaFormat) {
 
   private val mEmptyBuffers = ArrayDeque<AudioBuffer>()
   private val mFilledBuffers = ArrayDeque<AudioBuffer>()
@@ -37,153 +28,154 @@ class AudioChannel(decoder: MediaCodec,
 
   private var mRemixer: AudioRemixer? = null
 
-  private val mDecoderBuffers = MediaCodecBufferCompatWrapper(decoder)
-  private val mEncoderBuffers = MediaCodecBufferCompatWrapper(encoder)
+  private val mDecoderBuffers: MediaCodecBufferCompatWrapper
+  private val mEncoderBuffers: MediaCodecBufferCompatWrapper
 
   private val mOverflowBuffer = AudioBuffer()
 
   private var mActualDecodedFormat: MediaFormat? = null
 
+  private class AudioBuffer {
+    internal var bufferIndex: Int = 0
+    internal var presentationTimeUs: Long = 0
+    internal var data: ShortBuffer? = null
+  }
 
-  @Throws(UnsupportedOperationException::class)
+
+  init {
+
+    mDecoderBuffers = MediaCodecBufferCompatWrapper(mDecoder)
+    mEncoderBuffers = MediaCodecBufferCompatWrapper(mEncoder)
+  }
+
   fun setActualDecodedFormat(decodedFormat: MediaFormat) {
-    this.mActualDecodedFormat = decodedFormat
+    mActualDecodedFormat = decodedFormat
 
-    // extract the sample rate
-    mInputSampleRate = decodedFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-
-    when {
-      mInputSampleRate != audioOutputFormat.getInteger(
-          MediaFormat.KEY_SAMPLE_RATE) -> throw UnsupportedOperationException(
-          "Audio sample rate conversion not supported yet.")
+    mInputSampleRate = mActualDecodedFormat!!.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+    if (mInputSampleRate != mEncodeFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)) {
+      throw UnsupportedOperationException("Audio sample rate conversion not supported yet.")
     }
 
-    // check the channel count!
-    mInputChannelCount = decodedFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-    mOutputChannelCount = audioOutputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+    mInputChannelCount = mActualDecodedFormat!!.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+    mOutputChannelCount = mEncodeFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
 
-    when {
-      mInputChannelCount != 1 && mInputChannelCount != 2 -> throw UnsupportedOperationException(
+    if (mInputChannelCount != 1 && mInputChannelCount != 2) {
+      throw UnsupportedOperationException(
           "Input channel count ($mInputChannelCount) not supported.")
-      mOutputChannelCount != 1 && mOutputChannelCount != 2 -> throw UnsupportedOperationException(
+    }
+
+    if (mOutputChannelCount != 1 && mOutputChannelCount != 2) {
+      throw UnsupportedOperationException(
           "Output channel count ($mOutputChannelCount) not supported.")
     }
 
-    mRemixer = when {
-      mInputChannelCount > mOutputChannelCount -> DOWNMIX
-      mInputChannelCount < mOutputChannelCount -> UPMIX
-      else -> PASSTHROUGH
+    if (mInputChannelCount > mOutputChannelCount) {
+      mRemixer = DOWNMIX
+    } else if (mInputChannelCount < mOutputChannelCount) {
+      mRemixer = UPMIX
+    } else {
+      mRemixer = PASSTHROUGH
     }
 
     mOverflowBuffer.presentationTimeUs = 0
   }
 
   fun drainDecoderBufferAndQueue(bufferIndex: Int, presentationTimeUs: Long) {
-    mActualDecodedFormat?.let {
-      // get the buffer data at @bufferIndex and null if EOS
-      val data = when (bufferIndex) {
-        BUFFER_INDEX_END_OF_STREAM -> {
-          null
-        }
-        else -> {
-          mDecoderBuffers?.getOutputBuffer(bufferIndex)
-        }
-      }
-
-      var buffer = mEmptyBuffers.poll()
-      buffer.takeIf { it == null }.let {
-        buffer = AudioBuffer()
-      }
-
-      buffer?.bufferIndex = bufferIndex
-      buffer?.presentationTimeUs = presentationTimeUs
-      buffer?.data = data?.asShortBuffer()
-
-
-      mOverflowBuffer.data?.let {
-        // already has data
-      } ?: run {
-        mOverflowBuffer.data = data?.capacity()?.let {
-          ByteBuffer
-              .allocateDirect(it)
-              .order(ByteOrder.nativeOrder())
-              .asShortBuffer()
-        }
-        mOverflowBuffer.data?.clear()?.flip()
-      }
-
-      mFilledBuffers.add(buffer)
-    } ?: run {
+    if (mActualDecodedFormat == null) {
       throw RuntimeException("Buffer received before format!")
     }
+
+    val data = if (bufferIndex == BUFFER_INDEX_END_OF_STREAM)
+      null
+    else
+      mDecoderBuffers.getOutputBuffer(bufferIndex)
+
+    var buffer: AudioBuffer? = mEmptyBuffers.poll()
+    if (buffer == null) {
+      buffer = AudioBuffer()
+    }
+
+    buffer.bufferIndex = bufferIndex
+    buffer.presentationTimeUs = presentationTimeUs
+    buffer.data = data?.asShortBuffer()
+
+    if (mOverflowBuffer.data == null) {
+      mOverflowBuffer.data = ByteBuffer
+          .allocateDirect(data!!.capacity())
+          .order(ByteOrder.nativeOrder())
+          .asShortBuffer()
+      mOverflowBuffer.data!!.clear().flip()
+    }
+
+    mFilledBuffers.add(buffer)
   }
 
   fun feedEncoder(timeoutUs: Long): Boolean {
-    val hasOverflow = mOverflowBuffer.data != null && mOverflowBuffer.data?.hasRemaining() == true
+    val hasOverflow = mOverflowBuffer.data != null && mOverflowBuffer.data!!.hasRemaining()
+    if (mFilledBuffers.isEmpty() && !hasOverflow) {
+      // No audio data - Bail out
+      return false
+    }
 
-    // Encoder is full - Bail out
+    val encoderInBuffIndex = mEncoder.dequeueInputBuffer(timeoutUs)
+    if (encoderInBuffIndex < 0) {
+      // Encoder is full - Bail out
+      return false
+    }
 
-    //Drain overflow first
-    when {
-      mFilledBuffers.isEmpty() && !hasOverflow -> // No audio data - Bail out
-        return false
-      else -> {
-        val encoderInBuffIndex = encoder.dequeueInputBuffer(timeoutUs)
-        if (encoderInBuffIndex < 0) {
-          // Encoder is full - Bail out
-          return false
-        }
-
-        //Drain overflow first
-        val outBuffer = mEncoderBuffers.getInputBuffer(encoderInBuffIndex)?.asShortBuffer()
-
-        return when {
-          hasOverflow -> {
-            val presentationTimeUs = outBuffer?.let { drainOverflow(it) } ?: 0
-            encoder.queueInputBuffer(encoderInBuffIndex, 0,
-                outBuffer?.position() ?: 0.times(BYTES_PER_SHORT),
-                presentationTimeUs, 0)
-            true
-          }
-          else -> true
-        }
-
+    // Drain overflow first
+    val outBuffer = mEncoderBuffers.getInputBuffer(encoderInBuffIndex)?.asShortBuffer()
+    outBuffer?.let {
+      if (hasOverflow) {
+        val presentationTimeUs = drainOverflow(outBuffer)
+        mEncoder.queueInputBuffer(encoderInBuffIndex,
+            0, outBuffer.position() * BYTES_PER_SHORT,
+            presentationTimeUs, 0)
+        return true
       }
     }
 
-  }
+    val inBuffer = mFilledBuffers.poll()
+    if (inBuffer.bufferIndex == BUFFER_INDEX_END_OF_STREAM) {
+      mEncoder.queueInputBuffer(encoderInBuffIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+      return false
+    }
 
-  private fun sampleCountToDurationUs(sampleCount: Int,
-      sampleRate: Int,
-      channelCount: Int): Long {
-    return sampleCount / (sampleRate * MICROSECS_PER_SEC) / channelCount
+    outBuffer?.let {
+      val presentationTimeUs = remixAndMaybeFillOverflow(inBuffer, outBuffer)
+      mEncoder.queueInputBuffer(encoderInBuffIndex,
+          0, outBuffer.position() * BYTES_PER_SHORT,
+          presentationTimeUs, 0)
+      mDecoder.releaseOutputBuffer(inBuffer.bufferIndex, false)
+      mEmptyBuffers.add(inBuffer)
+    }
+
+    return true
   }
 
   private fun drainOverflow(outBuff: ShortBuffer): Long {
     val overflowBuff = mOverflowBuffer.data
-    val overflowLimit = overflowBuff?.limit()
-    val overflowSize = overflowBuff?.remaining() ?: 0
+    val overflowLimit = overflowBuff!!.limit()
+    val overflowSize = overflowBuff.remaining()
 
-    val beginPresentationTimeUs = mOverflowBuffer.presentationTimeUs +
-        sampleCountToDurationUs(overflowBuff?.position() ?: 0, mInputSampleRate,
-            mOutputChannelCount)
+    val beginPresentationTimeUs = mOverflowBuffer.presentationTimeUs + sampleCountToDurationUs(
+        overflowBuff.position(), mInputSampleRate, mOutputChannelCount)
 
-    outBuff.clear();
+    outBuff.clear()
     // Limit overflowBuff to outBuff's capacity
-    overflowBuff?.limit(outBuff.capacity())
+    overflowBuff.limit(outBuff.capacity())
     // Load overflowBuff onto outBuff
     outBuff.put(overflowBuff)
 
     if (overflowSize >= outBuff.capacity()) {
       // Overflow fully consumed - Reset
-      overflowBuff?.clear()?.limit(0)
+      overflowBuff.clear().limit(0)
     } else {
       // Only partially consumed - Keep position & restore previous limit
-      overflowLimit?.let { overflowBuff.limit(it) }
+      overflowBuff.limit(overflowLimit)
     }
 
     return beginPresentationTimeUs
-
   }
 
   private fun remixAndMaybeFillOverflow(input: AudioBuffer,
@@ -194,31 +186,45 @@ class AudioChannel(decoder: MediaCodec,
     outBuff.clear()
 
     // Reset position to 0, and set limit to capacity (Since MediaCodec doesn't do that for us)
-    inBuff?.clear()
+    inBuff!!.clear()
 
-    if (inBuff?.remaining() ?: 0 > outBuff.remaining()) {
+    if (inBuff.remaining() > outBuff.remaining()) {
       // Overflow
       // Limit inBuff to outBuff's capacity
-      inBuff?.limit(outBuff.capacity())
-      inBuff?.let { mRemixer?.remix(it, outBuff) }
+      inBuff.limit(outBuff.capacity())
+      mRemixer!!.remix(inBuff, outBuff)
 
       // Reset limit to its own capacity & Keep position
-      inBuff?.limit(inBuff.capacity())
+      inBuff.limit(inBuff.capacity())
 
       // Remix the rest onto overflowBuffer
       // NOTE: We should only reach this point when overflow buffer is empty
-      val consumedDurationUs = sampleCountToDurationUs(inBuff?.position() ?: 0, mInputSampleRate,
+      val consumedDurationUs = sampleCountToDurationUs(inBuff.position(), mInputSampleRate,
           mInputChannelCount)
-      inBuff?.let { overflowBuff?.let { it1 -> mRemixer?.remix(it, it1) } }
+      overflowBuff?.let { mRemixer!!.remix(inBuff, it) }
 
       // Seal off overflowBuff & mark limit
-      overflowBuff?.flip()
+      overflowBuff!!.flip()
       mOverflowBuffer.presentationTimeUs = input.presentationTimeUs + consumedDurationUs
     } else {
       // No overflow
-      inBuff?.let { mRemixer?.remix(it, outBuff) }
+      mRemixer!!.remix(inBuff, outBuff)
     }
 
     return input.presentationTimeUs
+  }
+
+  companion object {
+
+    val BUFFER_INDEX_END_OF_STREAM = -1
+
+    private val BYTES_PER_SHORT = 2
+    private val MICROSECS_PER_SEC: Long = 1000000
+
+    private fun sampleCountToDurationUs(sampleCount: Int,
+        sampleRate: Int,
+        channelCount: Int): Long {
+      return sampleCount / (sampleRate * MICROSECS_PER_SEC) / channelCount
+    }
   }
 }

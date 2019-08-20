@@ -5,8 +5,10 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import com.googlyandroid.ktvideocompressor.muxer.QueuedMuxer
 import com.googlyandroid.ktvideocompressor.muxer.SampleInfo
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.coroutines.CoroutineContext
 
 
 class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
@@ -35,8 +37,8 @@ class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
   }
 
   override fun stepPipeline(): Boolean {
-    when {
-      mIsEOS -> return false
+    return when {
+      mIsEOS -> false
       else -> {
         val trackIndex = mediaExtractor.sampleTrackIndex
         when {
@@ -45,9 +47,9 @@ class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
             mBufferInfo.set(0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
             queuedMuxer.writeSampleData(sampleType, mBuffer, mBufferInfo)
             mIsEOS = true
-            return true
+            true
           }
-          trackIndex != mVideoTrackIndex -> return false
+          trackIndex != mVideoTrackIndex -> false
           else -> {
             mBuffer.clear()
             val sampleSize = mediaExtractor.readSampleData(mBuffer, 0)
@@ -58,13 +60,11 @@ class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
             queuedMuxer.writeSampleData(sampleType, mBuffer, mBufferInfo)
             mWrittenPresentationTimeUs = mBufferInfo.presentationTimeUs
             mediaExtractor.advance()
-            return true
+            true
           }
         }
-
       }
     }
-
   }
 
   override fun getWrittenPresentationTimeUS(): Long {

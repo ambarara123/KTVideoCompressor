@@ -14,9 +14,7 @@ import com.googlyandroid.ktvideocompressor.transcoders.TrackTranscoder
 import com.googlyandroid.ktvideocompressor.transcoders.VideoTrackTranscoder
 import com.googlyandroid.ktvideocompressor.utils.ISO6709LocationParser
 import com.googlyandroid.ktvideocompressor.utils.MediaExtractorUtils
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
 import java.io.FileDescriptor
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.min
@@ -26,65 +24,62 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
     private val outPath: String) {
 
   private val PROGRESS_UNKNOWN = -1.0
-  private val SLEEP_TO_WAIT_TRACK_TRANSCODERS: Long = 10
   private val PROGRESS_INTERVAL_STEPS: Long = 10
 
-  suspend fun transcodeVideo(outFormatStrategy: MediaFormatStrategy,
-      coroutineContext: CoroutineContext) {
-    withContext(coroutineContext) {
-      val mediaExtractor = MediaExtractor()
-      mediaExtractor.setDataSource(mediaFileDescriptor)
+  fun transcodeVideo(
+      outFormatStrategy: MediaFormatStrategy, coroutineContext: CoroutineContext) {
+    val mediaExtractor = MediaExtractor()
+    mediaExtractor.setDataSource(mediaFileDescriptor)
 
-      val mediaMuxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-      val duration = extractMediaMetadataInfo(mediaFileDescriptor, mediaMuxer)
-      val (videoTrackTranscoder, audioTrackTranscoder) = setupTrackTranscoders(outFormatStrategy,
-          mediaExtractor, mediaMuxer)
-      runPipelines(duration, videoTrackTranscoder, audioTrackTranscoder, this)
+    val mediaMuxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+    val duration = extractMediaMetadataInfo(mediaFileDescriptor, mediaMuxer)
+
+    val transcoders = setupTrackTranscoders(outFormatStrategy,
+        mediaExtractor, mediaMuxer)
+
+    runPipelines(duration, transcoders.first, transcoders.second, coroutineContext)
+
+    try {
       mediaMuxer.stop()
 
-      videoTrackTranscoder.release()
-      audioTrackTranscoder.release()
+      transcoders.first.release()
+      transcoders.second.release()
+
       mediaExtractor.release()
       mediaMuxer.release()
+    } catch (ex: Exception) {
+      ex.printStackTrace()
     }
   }
 
   private fun runPipelines(duration: Long,
       videoTrackTranscoder: TrackTranscoder,
       audioTrackTranscoder: TrackTranscoder,
-      coroutineScope: CoroutineScope) {
+      coroutineContext: CoroutineContext) {
     var loopCount = 0
-    when {
-      duration <= 0 -> {
-        fireProgress(PROGRESS_UNKNOWN)
-      }
+    if (duration <= 0) {
+      Log.d(this.javaClass.name, "Trans progress $PROGRESS_UNKNOWN")
     }
+    while (!videoTrackTranscoder.isFinished() && !audioTrackTranscoder.isFinished() && coroutineContext[Job]?.isCancelled?.not() == true) {
 
-    while (!videoTrackTranscoder.isFinished() && !audioTrackTranscoder.isFinished() && (coroutineScope.isActive)) {
-      val stepped = videoTrackTranscoder.stepPipeline() || audioTrackTranscoder.stepPipeline()
+      videoTrackTranscoder.stepPipeline()
+      audioTrackTranscoder.stepPipeline()
+
       loopCount++
-      when {
-        isStillProcessing(duration, loopCount) -> {
-          val videoProgress = if (videoTrackTranscoder.isFinished()) 1.0 else min(1.0,
-              videoTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
-          val audioProgress = if (audioTrackTranscoder.isFinished()) 1.0 else min(1.0,
-              audioTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
-          val progress = (videoProgress + audioProgress) / 2.0
-          fireProgress(progress)
-        }
-      }
-      if (!stepped) {
-        Thread.sleep(SLEEP_TO_WAIT_TRACK_TRANSCODERS)
+
+      if (isStillProcessing(duration, loopCount)) {
+        val videoProgress = if (videoTrackTranscoder.isFinished()) 1.0 else min(1.0,
+            videoTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
+        val audioProgress = if (audioTrackTranscoder.isFinished()) 1.0 else min(1.0,
+            audioTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
+        val progress = (videoProgress + audioProgress) / 2.0
+        Log.d(this.javaClass.name, "Trans progress $progress")
       }
     }
   }
 
   private fun isStillProcessing(duration: Long, loopCount: Int) =
       duration > 0 && (loopCount % PROGRESS_INTERVAL_STEPS == 0L)
-
-  private fun fireProgress(progress: Double) {
-    Log.d(this.javaClass.name, "Trans progress $progress")
-  }
 
   private fun setupTrackTranscoders(
       formatStrategy: MediaFormatStrategy,
@@ -95,6 +90,7 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
     val videoOutputFormat = trackResult.mVideoTrackFormat?.let {
       formatStrategy.createVideoOutputFormat(it)
     }
+
     val audioOutputFormat = trackResult.mAudioTrackFormat?.let {
       formatStrategy.createAudioOutputFormat(it)
     }
@@ -163,7 +159,7 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
   }
 }
 
-private fun String.toSafeInt(): Int? {
+fun String.toSafeInt(): Int? {
   return try {
     this.toInt()
   } catch (ex: Exception) {

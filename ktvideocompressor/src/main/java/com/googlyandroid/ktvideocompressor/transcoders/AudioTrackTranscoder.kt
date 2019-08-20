@@ -47,14 +47,14 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
   override fun setup() {
     mediaExtractor.selectTrack(mAudioTrackIndex)
 
-    prepareEncoder()
+    initEncoder()
 
-    prepareDecoder()
+    initDecoder()
 
     prepareAudioChannel()
   }
 
-  private fun prepareDecoder() {
+  private fun initDecoder() {
     val inputFormat = mediaExtractor.getTrackFormat(mAudioTrackIndex)
     decoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME))
     decoder?.configure(inputFormat, null, null, 0)
@@ -74,7 +74,7 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
     }
   }
 
-  private fun prepareEncoder() {
+  private fun initEncoder() {
     encoder = MediaCodec.createEncoderByType(audioOutputFormat.getString(MediaFormat.KEY_MIME))
     encoder?.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
     encoder?.start()
@@ -88,23 +88,16 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
 
   override fun stepPipeline(): Boolean {
     var busy = false
-    var status = 0
-    while (drainEncoder(0) != DRAIN_STATE_NONE) {
-      busy = true
-    }
 
-    while (status == DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY) {
+    var status: Int
+    while (drainEncoder(0) != DRAIN_STATE_NONE) busy = true
+    do {
       status = drainDecoder(0)
-      if (status != DRAIN_STATE_NONE) {
-        busy = true
-      }
+      if (status != DRAIN_STATE_NONE) busy = true
       // NOTE: not repeating to keep from deadlock when encoder is full.
-    }
+    } while (status == DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY)
 
-    audioChannel?.let {
-      while (it.feedEncoder(0)) busy = true
-    }
-
+    while (audioChannel?.feedEncoder(0) == true) busy = true
     while (drainExtractor(0) != DRAIN_STATE_NONE) busy = true
 
     return busy
