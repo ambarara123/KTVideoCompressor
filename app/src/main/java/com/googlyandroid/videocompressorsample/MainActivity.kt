@@ -9,16 +9,15 @@ import android.provider.MediaStore
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
-import androidx.navigation.findNavController
 import com.googlyandroid.ktvideocompressor.KTMediaTranscoder
-import kotlinx.android.synthetic.main.activity_main.*
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import navigation
+import kotlinx.coroutines.*
 
 
 class MainActivity : AppCompatActivity() {
+
+  val job = Job()
+
+  val transcodingJob = CoroutineScope(Dispatchers.Main + job)
 
   private val REQUEST_READ_STORAGE: Int = 1
 
@@ -33,7 +32,6 @@ class MainActivity : AppCompatActivity() {
           REQUEST_READ_STORAGE)
     } else {
       pickVideo()
-
     }
   }
 
@@ -80,8 +78,13 @@ class MainActivity : AppCompatActivity() {
   }
 
   private fun transcodeVideo(videoPath: String?) {
-    CoroutineScope(Dispatchers.Main).launch {
+    transcodingJob.launch {
       videoPath?.let { KTMediaTranscoder.transcodeVideo(it, createTempFile().path) }
     }
+  }
+
+  override fun onDestroy() {
+    super.onDestroy()
+    transcodingJob.cancel()
   }
 }

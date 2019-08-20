@@ -9,9 +9,11 @@ import com.googlyandroid.ktvideocompressor.muxer.QueuedMuxer
 import com.googlyandroid.ktvideocompressor.muxer.SampleInfo
 
 class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
-    private val mAudioTrackIndex: Int, private val audioOutputFormat: MediaFormat,
+    private val mAudioTrackIndex: Int,
+    private val audioOutputFormat: MediaFormat,
     private val queuedMuxer: QueuedMuxer) : TrackTranscoder {
 
+  private var mInputFormat: MediaFormat? = null
   private var mActualOutputFormat: MediaFormat? = null
   private val DRAIN_STATE_NONE = 0
   private val DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY = 1
@@ -37,16 +39,22 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
   private var mWrittenPresentationTimeUs: Long = 0
 
 
+  init {
+    mInputFormat = mediaExtractor.getTrackFormat(mAudioTrackIndex);
+
+  }
+
   override fun setup() {
     mediaExtractor.selectTrack(mAudioTrackIndex)
-    encoder = MediaCodec.createEncoderByType(audioOutputFormat.getString(MediaFormat.KEY_MIME))
-    encoder?.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-    encoder?.start()
-    encoderStarted = true
-    encoder?.let {
-      encoderBuffers = MediaCodecBufferCompatWrapper(it)
-    }
 
+    prepareEncoder()
+
+    prepareDecoder()
+
+    prepareAudioChannel()
+  }
+
+  private fun prepareDecoder() {
     val inputFormat = mediaExtractor.getTrackFormat(mAudioTrackIndex)
     decoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME))
     decoder?.configure(inputFormat, null, null, 0)
@@ -56,16 +64,27 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
       decoderBuffers = MediaCodecBufferCompatWrapper(it)
     }
 
+  }
+
+  private fun prepareAudioChannel() {
     decoder?.let { dec ->
       encoder?.let { enc ->
         audioChannel = AudioChannel(dec, enc, audioOutputFormat)
       }
     }
-
   }
 
-  override fun getDeterminedFormat() = mediaExtractor.getTrackFormat(mAudioTrackIndex)
+  private fun prepareEncoder() {
+    encoder = MediaCodec.createEncoderByType(audioOutputFormat.getString(MediaFormat.KEY_MIME))
+    encoder?.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+    encoder?.start()
+    encoderStarted = true
+    encoder?.let {
+      encoderBuffers = MediaCodecBufferCompatWrapper(it)
+    }
+  }
 
+  override fun getDeterminedFormat() = mInputFormat
 
   override fun stepPipeline(): Boolean {
     var busy = false

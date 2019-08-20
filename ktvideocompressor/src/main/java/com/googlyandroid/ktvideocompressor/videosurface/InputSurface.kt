@@ -11,19 +11,16 @@ import android.view.Surface
  * to create an EGL window surface.  Calls to eglSwapBuffers() cause a frame of data to be sent
  * to the video encoder.
  */
-internal class InputSurface
+
 /**
  * Creates an InputSurface from a Surface.
  */
-(surface: Surface?) {
+class InputSurface(private var surface: Surface?) {
+
   private var mEGLDisplay: EGLDisplay? = EGL14.EGL_NO_DISPLAY
   private var mEGLContext: EGLContext? = EGL14.EGL_NO_CONTEXT
   private var mEGLSurface: EGLSurface? = EGL14.EGL_NO_SURFACE
-  /**
-   * Returns the Surface that the MediaCodec receives buffers from.
-   */
-  var surface: Surface? = null
-    private set
+
   /**
    * Queries the surface's width.
    */
