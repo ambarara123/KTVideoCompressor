@@ -5,10 +5,8 @@ import android.media.MediaExtractor
 import android.media.MediaFormat
 import com.googlyandroid.ktvideocompressor.muxer.QueuedMuxer
 import com.googlyandroid.ktvideocompressor.muxer.SampleInfo
-import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import kotlin.coroutines.CoroutineContext
 
 
 class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
@@ -20,7 +18,6 @@ class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
   private var format: MediaFormat = mediaExtractor.getTrackFormat(mVideoTrackIndex)
   private var mBuffer: ByteBuffer
   private var mIsEOS: Boolean = false
-  private val mBufferInfo = MediaCodec.BufferInfo()
 
   init {
     queuedMuxer.setOutputFormat(sampleType, format)
@@ -36,7 +33,7 @@ class PassThroughTrackTranscoder(private val mediaExtractor: MediaExtractor,
     return format
   }
 
-  override fun stepPipeline(): Boolean {
+  override fun stepPipeline(mBufferInfo: MediaCodec.BufferInfo): Boolean {
     return when {
       mIsEOS -> false
       else -> {

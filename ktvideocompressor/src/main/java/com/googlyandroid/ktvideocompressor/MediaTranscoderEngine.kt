@@ -1,5 +1,6 @@
 package com.googlyandroid.ktvideocompressor
 
+import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaMetadataRetriever
 import android.media.MediaMuxer
@@ -15,6 +16,7 @@ import com.googlyandroid.ktvideocompressor.transcoders.VideoTrackTranscoder
 import com.googlyandroid.ktvideocompressor.utils.ISO6709LocationParser
 import com.googlyandroid.ktvideocompressor.utils.MediaExtractorUtils
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.withContext
 import java.io.FileDescriptor
 import kotlin.coroutines.CoroutineContext
 import kotlin.math.min
@@ -26,29 +28,30 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
   private val PROGRESS_UNKNOWN = -1.0
   private val PROGRESS_INTERVAL_STEPS: Long = 10
 
-  fun transcodeVideo(
+  suspend fun transcodeVideo(
       outFormatStrategy: MediaFormatStrategy, coroutineContext: CoroutineContext) {
-    val mediaExtractor = MediaExtractor()
-    mediaExtractor.setDataSource(mediaFileDescriptor)
+    return withContext(coroutineContext) {
+      val mediaExtractor = MediaExtractor()
+      mediaExtractor.setDataSource(mediaFileDescriptor)
 
-    val mediaMuxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-    val duration = extractMediaMetadataInfo(mediaFileDescriptor, mediaMuxer)
+      val mediaMuxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+      val duration = extractMediaMetadataInfo(mediaFileDescriptor, mediaMuxer)
 
-    val transcoders = setupTrackTranscoders(outFormatStrategy,
-        mediaExtractor, mediaMuxer)
+      val transcoders = setupTrackTranscoders(outFormatStrategy, mediaExtractor, mediaMuxer)
 
-    runPipelines(duration, transcoders.first, transcoders.second, coroutineContext)
+      runPipelines(duration, transcoders.first, transcoders.second, coroutineContext)
 
-    try {
-      mediaMuxer.stop()
+      try {
+        mediaMuxer.stop()
 
-      transcoders.first.release()
-      transcoders.second.release()
+        transcoders.first.release()
+        transcoders.second.release()
 
-      mediaExtractor.release()
-      mediaMuxer.release()
-    } catch (ex: Exception) {
-      ex.printStackTrace()
+        mediaExtractor.release()
+        mediaMuxer.release()
+      } catch (ex: Exception) {
+        ex.printStackTrace()
+      }
     }
   }
 
@@ -60,10 +63,14 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
     if (duration <= 0) {
       Log.d(this.javaClass.name, "Trans progress $PROGRESS_UNKNOWN")
     }
+
+    val mBufferInfoVideo = MediaCodec.BufferInfo()
+    val mBufferInfoAudio = MediaCodec.BufferInfo()
+
     while (!videoTrackTranscoder.isFinished() && !audioTrackTranscoder.isFinished() && coroutineContext[Job]?.isCancelled?.not() == true) {
 
-      videoTrackTranscoder.stepPipeline()
-      audioTrackTranscoder.stepPipeline()
+      videoTrackTranscoder.stepPipeline(mBufferInfoVideo)
+      audioTrackTranscoder.stepPipeline(mBufferInfoAudio)
 
       loopCount++
 

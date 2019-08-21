@@ -15,9 +15,9 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
     private val mVideoTrackIndex: Int,
     private val videoOutputFormat: MediaFormat,
     private val queuedMuxer: QueuedMuxer) : TrackTranscoder {
-  private var mBufferInfo = MediaCodec.BufferInfo()
-  private var mDecoder: MediaCodec? = null
-  private var mEncoder: MediaCodec? = null
+
+  private lateinit var mEncoder: MediaCodec
+  private lateinit var mDecoder: MediaCodec
 
   private var decoderBuffers: MediaCodecBufferCompatWrapper? = null
   private var encoderBuffers: MediaCodecBufferCompatWrapper? = null
@@ -34,14 +34,13 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
 
   override fun setup() {
     mediaExtractor.selectTrack(mVideoTrackIndex)
-
     val inputFormat = mediaExtractor.getTrackFormat(mVideoTrackIndex)
 
-    initEncoder()
+    mEncoder = initEncoder()
 
     handleRotationInputFormat(inputFormat)
 
-    initDecoder(inputFormat)
+    mDecoder = initDecoder(inputFormat)
 
   }
 
@@ -54,43 +53,38 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
     }
   }
 
-  private fun initDecoder(inputFormat: MediaFormat) {
-    mDecoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME))
-    mDecoderOutputSurfaceWrapper = OutputSurface()
-    mDecoder?.configure(inputFormat, mDecoderOutputSurfaceWrapper?.surface, null, 0)
-    mDecoder?.start()
-    mDecoderStarted = true
-
-    mDecoder?.let {
-      decoderBuffers = MediaCodecBufferCompatWrapper(it)
-    }
-  }
-
-  private fun initEncoder() {
+  private fun initEncoder(): MediaCodec {
     // create a inputsurface to grab video frames
-    mEncoder = MediaCodec.createEncoderByType(videoOutputFormat.getString(MediaFormat.KEY_MIME))
-    mEncoder?.configure(videoOutputFormat, null, null, CONFIGURE_FLAG_ENCODE)
-
-    mEncoder?.let {
-      encoderBuffers = MediaCodecBufferCompatWrapper(it)
-    }
-
-    mEncoderInputSurfaceWrapper = InputSurface(mEncoder?.createInputSurface())
+    val mEncoder = MediaCodec.createEncoderByType(videoOutputFormat.getString(MediaFormat.KEY_MIME))
+    mEncoder.configure(videoOutputFormat, null, null, CONFIGURE_FLAG_ENCODE)
+    encoderBuffers = MediaCodecBufferCompatWrapper(mEncoder)
+    mEncoderInputSurfaceWrapper = InputSurface(mEncoder.createInputSurface())
     mEncoderInputSurfaceWrapper?.makeCurrent()
 
-    mEncoder?.start()
+    mEncoder.start()
     mEncoderStarted = true
+    return mEncoder
+  }
+
+  private fun initDecoder(inputFormat: MediaFormat): MediaCodec {
+    val mDecoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME))
+    mDecoderOutputSurfaceWrapper = OutputSurface()
+    mDecoder.configure(inputFormat, mDecoderOutputSurfaceWrapper?.surface, null, 0)
+    mDecoder.start()
+    mDecoderStarted = true
+    decoderBuffers = MediaCodecBufferCompatWrapper(mDecoder)
+    return mDecoder
   }
 
   override fun getDeterminedFormat() = mActualOutputFormat
 
-  override fun stepPipeline(): Boolean {
+  override fun stepPipeline(mBufferInfo: MediaCodec.BufferInfo): Boolean {
     var busy = false
 
     var status: Int
-    while (drainEncoder(0) != DRAIN_STATE_NONE) busy = true
+    while (drainEncoder(0, mBufferInfo) != DRAIN_STATE_NONE) busy = true
     do {
-      status = drainDecoder(0)
+      status = drainDecoder(0, mBufferInfo)
       if (status != DRAIN_STATE_NONE) busy = true
       // NOTE: not repeating to keep from deadlock when encoder is full.
     } while (status == DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY)
@@ -111,37 +105,39 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
       it.release()
     }
 
-    if (mDecoder != null) {
-      if (mDecoderStarted) mDecoder?.stop()
-      mDecoder?.release()
+
+    if (mDecoderStarted) {
+      mDecoder.stop()
     }
-    if (mEncoder != null) {
-      if (mEncoderStarted) mEncoder?.stop()
-      mEncoder?.release()
+    mDecoder.release()
+
+    if (mEncoderStarted) {
+      mEncoder.stop()
     }
+    mEncoder.release()
   }
 
   private fun drainExtractor(timeoutUs: Long): Int {
     if (mIsExtractorEOS) return DRAIN_STATE_NONE
-    val trackIndex = mediaExtractor.getSampleTrackIndex()
+    val trackIndex = mediaExtractor.sampleTrackIndex
     trackIndex.let {
       if (trackIndex >= 0 && trackIndex != mVideoTrackIndex) {
         return DRAIN_STATE_NONE
       }
 
-      val result = mDecoder?.dequeueInputBuffer(timeoutUs)
-      result?.let {
+      val result = mDecoder.dequeueInputBuffer(timeoutUs)
+      result.let {
         if (result < 0) return DRAIN_STATE_NONE
         if (trackIndex < 0) {
           mIsExtractorEOS = true
-          mDecoder?.queueInputBuffer(result, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+          mDecoder.queueInputBuffer(result, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
           return DRAIN_STATE_NONE
         }
         decoderBuffers?.getInputBuffer(result)?.let { it1 ->
           val sampleSize = mediaExtractor.readSampleData(it1, 0)
-          mediaExtractor.sampleTime?.let { it2 ->
-            sampleSize?.let { it3 ->
-              mDecoder?.queueInputBuffer(result, 0, it3, it2,
+          mediaExtractor.sampleTime.let { it2 ->
+            sampleSize.let { it3 ->
+              mDecoder.queueInputBuffer(result, 0, it3, it2,
                   if (mediaExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0) MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0)
             }
           }
@@ -152,22 +148,22 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
     return DRAIN_STATE_CONSUMED
   }
 
-  private fun drainDecoder(timeoutUs: Long): Int {
+  private fun drainDecoder(timeoutUs: Long, mBufferInfo: MediaCodec.BufferInfo): Int {
     if (mIsDecoderEOS) return DRAIN_STATE_NONE
-    val result = mDecoder?.dequeueOutputBuffer(mBufferInfo, timeoutUs)
+    val result = mDecoder.dequeueOutputBuffer(mBufferInfo, timeoutUs)
     when (result) {
       MediaCodec.INFO_TRY_AGAIN_LATER -> return DRAIN_STATE_NONE
       MediaCodec.INFO_OUTPUT_FORMAT_CHANGED, MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
     }
     if (mBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-      mEncoder?.signalEndOfInputStream()
+      mEncoder.signalEndOfInputStream()
       mIsDecoderEOS = true
       mBufferInfo.size = 0
     }
     val doRender = mBufferInfo.size > 0
     // NOTE: doRender will block if buffer (of encoder) is full.
     // Refer: http://bigflake.com/mediacodec/CameraToMpegTest.java.txt
-    result?.let { mDecoder?.releaseOutputBuffer(it, doRender) }
+    result.let { mDecoder.releaseOutputBuffer(it, doRender) }
     if (doRender) {
       mDecoderOutputSurfaceWrapper?.awaitNewImage()
       mDecoderOutputSurfaceWrapper?.drawImage()
@@ -177,15 +173,15 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
     return DRAIN_STATE_CONSUMED
   }
 
-  private fun drainEncoder(timeoutUs: Long): Int {
+  private fun drainEncoder(timeoutUs: Long, mBufferInfo: MediaCodec.BufferInfo): Int {
     if (mIsEncoderEOS) return DRAIN_STATE_NONE
-    val result = mEncoder?.dequeueOutputBuffer(mBufferInfo, timeoutUs)
+    val result = mEncoder.dequeueOutputBuffer(mBufferInfo, timeoutUs)
     when (result) {
       MediaCodec.INFO_TRY_AGAIN_LATER -> return DRAIN_STATE_NONE
       MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
         if (mActualOutputFormat != null)
           throw RuntimeException("Video output format changed twice.")
-        mActualOutputFormat = mEncoder?.outputFormat
+        mActualOutputFormat = mEncoder.outputFormat
         mActualOutputFormat?.let { queuedMuxer.setOutputFormat(SampleType.VIDEO, it) }
         return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
       }
@@ -203,16 +199,16 @@ class VideoTrackTranscoder(private val mediaExtractor: MediaExtractor,
     }
     if (mBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
       // SPS or PPS, which should be passed by MediaFormat.
-      result?.let { mEncoder?.releaseOutputBuffer(it, false) }
+      result.let { mEncoder.releaseOutputBuffer(it, false) }
       return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
     }
-    result?.let {
+    result.let {
       encoderBuffers?.getOutputBuffer(it)?.let {
         queuedMuxer.writeSampleData(SampleType.VIDEO, it, mBufferInfo)
       }
     }
     mWrittenPresentationTimeUs = mBufferInfo.presentationTimeUs
-    result?.let { mEncoder?.releaseOutputBuffer(it, false) }
+    result.let { mEncoder.releaseOutputBuffer(it, false) }
     return DRAIN_STATE_CONSUMED
   }
 

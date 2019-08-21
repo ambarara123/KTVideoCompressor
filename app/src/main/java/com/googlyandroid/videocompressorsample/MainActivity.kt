@@ -14,9 +14,9 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import com.googlyandroid.ktvideocompressor.KTMediaTranscoder
+import com.googlyandroid.ktvideocompressor.mediaStrategy.NoOpMediaFormatStrategy
 import kotlinx.android.synthetic.main.activity_main.*
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.consumeEach
 import java.io.File
 import java.io.FileInputStream
 
@@ -117,7 +117,8 @@ class MainActivity : AppCompatActivity() {
   private fun transcodeVideo(videoPath: String?) {
     transcodingJob.launch {
       videoPath?.let {
-        KTMediaTranscoder.transcodeVideo(it, createTempFile().path,coroutineContext = coroutineContext)
+        val formatStrategy = NoOpMediaFormatStrategy()
+        KTMediaTranscoder.transcodeVideo(it, createTempFile().path, formatStrategy)
       }
     }
   }

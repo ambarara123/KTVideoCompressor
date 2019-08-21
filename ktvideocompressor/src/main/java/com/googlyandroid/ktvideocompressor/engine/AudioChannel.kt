@@ -28,8 +28,8 @@ internal class AudioChannel(private val mDecoder: MediaCodec,
 
   private var mRemixer: AudioRemixer? = null
 
-  private val mDecoderBuffers: MediaCodecBufferCompatWrapper
-  private val mEncoderBuffers: MediaCodecBufferCompatWrapper
+  private val mDecoderBuffers: MediaCodecBufferCompatWrapper = MediaCodecBufferCompatWrapper(mDecoder)
+  private val mEncoderBuffers: MediaCodecBufferCompatWrapper = MediaCodecBufferCompatWrapper(mEncoder)
 
   private val mOverflowBuffer = AudioBuffer()
 
@@ -41,12 +41,6 @@ internal class AudioChannel(private val mDecoder: MediaCodec,
     internal var data: ShortBuffer? = null
   }
 
-
-  init {
-
-    mDecoderBuffers = MediaCodecBufferCompatWrapper(mDecoder)
-    mEncoderBuffers = MediaCodecBufferCompatWrapper(mEncoder)
-  }
 
   fun setActualDecodedFormat(decodedFormat: MediaFormat) {
     mActualDecodedFormat = decodedFormat

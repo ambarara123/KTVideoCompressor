@@ -13,22 +13,19 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
     private val audioOutputFormat: MediaFormat,
     private val queuedMuxer: QueuedMuxer) : TrackTranscoder {
 
+  private lateinit var encoder: MediaCodec
+  private lateinit var mDecoder: MediaCodec
   private var mInputFormat: MediaFormat? = null
   private var mActualOutputFormat: MediaFormat? = null
   private val DRAIN_STATE_NONE = 0
   private val DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY = 1
   private val DRAIN_STATE_CONSUMED = 2
 
-  private val mBufferInfo = MediaCodec.BufferInfo()
-
   private var audioChannel: AudioChannel? = null
   private var decoderBuffers: MediaCodecBufferCompatWrapper? = null
   private var encoderBuffers: MediaCodecBufferCompatWrapper? = null
 
   private var encoderStarted: Boolean = false
-  private var encoder: MediaCodec? = null
-
-  private var decoder: MediaCodec? = null
   private var decoderStarted: Boolean = false
 
 
@@ -47,52 +44,41 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
   override fun setup() {
     mediaExtractor.selectTrack(mAudioTrackIndex)
 
-    initEncoder()
+    encoder = initEncoder()
 
-    initDecoder()
+    mDecoder = initDecoder()
 
-    prepareAudioChannel()
+    audioChannel = AudioChannel(mDecoder, encoder, audioOutputFormat)
   }
 
-  private fun initDecoder() {
+  private fun initDecoder(): MediaCodec {
     val inputFormat = mediaExtractor.getTrackFormat(mAudioTrackIndex)
-    decoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME))
-    decoder?.configure(inputFormat, null, null, 0)
-    decoder?.start()
+    val decoder = MediaCodec.createDecoderByType(inputFormat.getString(MediaFormat.KEY_MIME))
+    decoder.configure(inputFormat, null, null, 0)
+    decoder.start()
     decoderStarted = true
-    decoder?.let {
-      decoderBuffers = MediaCodecBufferCompatWrapper(it)
-    }
-
+    decoderBuffers = MediaCodecBufferCompatWrapper(decoder)
+    return decoder
   }
 
-  private fun prepareAudioChannel() {
-    decoder?.let { dec ->
-      encoder?.let { enc ->
-        audioChannel = AudioChannel(dec, enc, audioOutputFormat)
-      }
-    }
-  }
-
-  private fun initEncoder() {
-    encoder = MediaCodec.createEncoderByType(audioOutputFormat.getString(MediaFormat.KEY_MIME))
-    encoder?.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-    encoder?.start()
+  private fun initEncoder(): MediaCodec {
+    val encoder = MediaCodec.createEncoderByType(audioOutputFormat.getString(MediaFormat.KEY_MIME))
+    encoder.configure(audioOutputFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+    encoder.start()
     encoderStarted = true
-    encoder?.let {
-      encoderBuffers = MediaCodecBufferCompatWrapper(it)
-    }
+    encoderBuffers = MediaCodecBufferCompatWrapper(encoder)
+    return encoder
   }
 
   override fun getDeterminedFormat() = mInputFormat
 
-  override fun stepPipeline(): Boolean {
+  override fun stepPipeline(mBufferInfo: MediaCodec.BufferInfo): Boolean {
     var busy = false
 
     var status: Int
-    while (drainEncoder(0) != DRAIN_STATE_NONE) busy = true
+    while (drainEncoder(0, mBufferInfo) != DRAIN_STATE_NONE) busy = true
     do {
-      status = drainDecoder(0)
+      status = drainDecoder(0, mBufferInfo)
       if (status != DRAIN_STATE_NONE) busy = true
       // NOTE: not repeating to keep from deadlock when encoder is full.
     } while (status == DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY)
@@ -105,82 +91,71 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
 
   private fun drainExtractor(timeoutUs: Long): Int {
     if (mIsExtractorEOS) return DRAIN_STATE_NONE
-    val trackIndex = mediaExtractor.getSampleTrackIndex()
+    val trackIndex = mediaExtractor.sampleTrackIndex
     if (trackIndex >= 0 && trackIndex != mAudioTrackIndex) {
       return DRAIN_STATE_NONE
     }
-    decoder?.let {
-      val result = it.dequeueInputBuffer(timeoutUs)
-      if (result < 0) return DRAIN_STATE_NONE
-      if (trackIndex < 0) {
-        mIsExtractorEOS = true
-        it.queueInputBuffer(result, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-        return DRAIN_STATE_NONE
-      }
-
-      val sampleSize = decoderBuffers?.getInputBuffer(result)?.let { it1 ->
-        mediaExtractor.readSampleData(it1, 0)
-      }
-      val isKeyFrame = mediaExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
-      sampleSize?.let { it1 ->
-        decoder?.queueInputBuffer(result, 0, it1, mediaExtractor.sampleTime,
-            if (isKeyFrame) MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0)
-      }
-      mediaExtractor.advance()
-      return DRAIN_STATE_CONSUMED
-    } ?: run {
-      throw RuntimeException("Why is the decoder null ?")
+    val result = mDecoder.dequeueInputBuffer(timeoutUs)
+    if (result < 0) return DRAIN_STATE_NONE
+    if (trackIndex < 0) {
+      mIsExtractorEOS = true
+      mDecoder.queueInputBuffer(result, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+      return DRAIN_STATE_NONE
     }
 
+    val sampleSize = decoderBuffers?.getInputBuffer(result)?.let { it1 ->
+      mediaExtractor.readSampleData(it1, 0)
+    }
+    val isKeyFrame = mediaExtractor.sampleFlags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+    sampleSize?.let { it1 ->
+      mDecoder.queueInputBuffer(result, 0, it1, mediaExtractor.sampleTime,
+          if (isKeyFrame) MediaCodec.BUFFER_FLAG_SYNC_FRAME else 0)
+    }
+    mediaExtractor.advance()
+    return DRAIN_STATE_CONSUMED
   }
 
-  private fun drainDecoder(timeoutUs: Long): Int {
+  private fun drainDecoder(timeoutUs: Long, mBufferInfo: MediaCodec.BufferInfo): Int {
     if (mIsDecoderEOS) return DRAIN_STATE_NONE
 
-    val result = decoder?.dequeueOutputBuffer(mBufferInfo, timeoutUs)
-    result?.let {
-      when (result) {
-        MediaCodec.INFO_TRY_AGAIN_LATER -> return DRAIN_STATE_NONE
-        MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
-          decoder?.outputFormat?.let { it1 -> audioChannel?.setActualDecodedFormat(it1) }
-          return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
-        }
-        MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
+    val result = mDecoder.dequeueOutputBuffer(mBufferInfo, timeoutUs)
+    when (result) {
+      MediaCodec.INFO_TRY_AGAIN_LATER -> return DRAIN_STATE_NONE
+      MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+        mDecoder.outputFormat.let { it1 -> audioChannel?.setActualDecodedFormat(it1) }
+        return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
       }
+      MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
+    }
 
-      when {
-        mBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0 -> {
-          mIsDecoderEOS = true
-          audioChannel?.drainDecoderBufferAndQueue(AudioChannel.BUFFER_INDEX_END_OF_STREAM, 0)
-        }
-        mBufferInfo.size > 0 -> audioChannel?.drainDecoderBufferAndQueue(result,
-            mBufferInfo.presentationTimeUs)
-        else -> {
-
-        }
-
+    when {
+      mBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0 -> {
+        mIsDecoderEOS = true
+        audioChannel?.drainDecoderBufferAndQueue(AudioChannel.BUFFER_INDEX_END_OF_STREAM, 0)
       }
+      mBufferInfo.size > 0 -> audioChannel?.drainDecoderBufferAndQueue(result,
+          mBufferInfo.presentationTimeUs)
     }
 
     return DRAIN_STATE_CONSUMED
   }
 
-  private fun drainEncoder(timeoutUs: Long): Int {
+  private fun drainEncoder(timeoutUs: Long, mBufferInfo: MediaCodec.BufferInfo): Int {
     if (mIsEncoderEOS) return DRAIN_STATE_NONE
 
-    val result = encoder?.dequeueOutputBuffer(mBufferInfo, timeoutUs)
+    val result = encoder.dequeueOutputBuffer(mBufferInfo, timeoutUs)
     when (result) {
       MediaCodec.INFO_TRY_AGAIN_LATER -> return DRAIN_STATE_NONE
       MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
         if (mActualOutputFormat != null) {
           throw RuntimeException("Audio output format changed twice.")
         }
-        mActualOutputFormat = encoder?.outputFormat
+        mActualOutputFormat = encoder.outputFormat
         mActualOutputFormat?.let { queuedMuxer.setOutputFormat(SampleInfo.SampleType.AUDIO, it) }
         return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
       }
       MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED -> {
-        encoderBuffers = encoder?.let { MediaCodecBufferCompatWrapper(it) }
+        encoderBuffers = encoder.let { MediaCodecBufferCompatWrapper(it) }
         return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
       }
     }
@@ -195,17 +170,17 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
     }
     if (mBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
       // SPS or PPS, which should be passed by MediaFormat.
-      result?.let { encoder?.releaseOutputBuffer(it, false) }
+      result.let { encoder.releaseOutputBuffer(it, false) }
       return DRAIN_STATE_SHOULD_RETRY_IMMEDIATELY
     }
-    result?.let {
+    result.let {
       encoderBuffers?.getOutputBuffer(it)?.let {
         queuedMuxer.writeSampleData(SampleInfo.SampleType.AUDIO, it,
             mBufferInfo)
       }
     }
     mWrittenPresentationTimeUs = mBufferInfo.presentationTimeUs
-    result?.let { encoder?.releaseOutputBuffer(it, false) }
+    result.let { encoder.releaseOutputBuffer(it, false) }
     return DRAIN_STATE_CONSUMED
   }
 
@@ -214,15 +189,11 @@ class AudioTrackTranscoder(private val mediaExtractor: MediaExtractor,
   override fun isFinished() = mIsEncoderEOS
 
   override fun release() {
-    decoder?.let {
-      if (decoderStarted) {
-        decoder?.release()
-      }
+    if (decoderStarted) {
+      mDecoder.release()
     }
-    encoder?.let {
-      if (encoderStarted) {
-        encoder?.release()
-      }
+    if (encoderStarted) {
+      encoder.release()
     }
   }
 

@@ -3,16 +3,12 @@ package com.googlyandroid.ktvideocompressor.mediaStrategy
 import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaFormat.MIMETYPE_AUDIO_AAC
-import android.util.Log
 
 
 class NoOpMediaFormatStrategy : MediaFormatStrategy {
 
   val AUDIO_BITRATE_AS_IS = -1
   val AUDIO_CHANNELS_AS_IS = -1
-  private val TAG = "720pFormatStrategy"
-  private val LONGER_LENGTH = 1280
-  private val SHORTER_LENGTH = 720
   private val DEFAULT_VIDEO_BITRATE = 8000 * 1000 // From Nexus 4 Camera in 720p
   private val mVideoBitrate: Int = DEFAULT_VIDEO_BITRATE
   private var mAudioBitrate: Int = 128 * 1000
@@ -21,31 +17,7 @@ class NoOpMediaFormatStrategy : MediaFormatStrategy {
   override fun createVideoOutputFormat(inputFormat: MediaFormat): MediaFormat? {
     val width = inputFormat.getInteger(MediaFormat.KEY_WIDTH)
     val height = inputFormat.getInteger(MediaFormat.KEY_HEIGHT)
-    val longer: Int
-    val shorter: Int
-    val outWidth: Int
-    val outHeight: Int
-    if (width >= height) {
-      longer = width
-      shorter = height
-      outWidth = LONGER_LENGTH
-      outHeight = SHORTER_LENGTH
-    } else {
-      shorter = width
-      longer = height
-      outWidth = SHORTER_LENGTH
-      outHeight = LONGER_LENGTH
-    }
-    if (longer * 9 != shorter * 16) {
-      throw RuntimeException(
-          "This video is not 16:9, and is not able to transcode. (" + width + "x" + height + ")")
-    }
-    if (shorter <= SHORTER_LENGTH) {
-      Log.d(TAG,
-          "This video is less or equal to 720p, pass-through. (" + width + "x" + height + ")")
-      return null
-    }
-    val format = MediaFormat.createVideoFormat("video/avc", outWidth, outHeight)
+    val format = MediaFormat.createVideoFormat("video/avc", width, height)
     // From Nexus 4 Camera in 720p
     format.setInteger(MediaFormat.KEY_BIT_RATE, mVideoBitrate)
     format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
