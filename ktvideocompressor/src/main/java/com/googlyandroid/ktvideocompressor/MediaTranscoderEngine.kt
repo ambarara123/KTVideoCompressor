@@ -1,9 +1,6 @@
 package com.googlyandroid.ktvideocompressor
 
-import android.media.MediaCodec
-import android.media.MediaExtractor
-import android.media.MediaMetadataRetriever
-import android.media.MediaMuxer
+import android.media.*
 import android.os.Build
 import android.util.Log
 import com.googlyandroid.ktvideocompressor.mediaStrategy.MediaFormatStrategy
@@ -16,6 +13,7 @@ import com.googlyandroid.ktvideocompressor.transcoders.VideoTrackTranscoder
 import com.googlyandroid.ktvideocompressor.utils.ISO6709LocationParser
 import com.googlyandroid.ktvideocompressor.utils.MediaExtractorUtils
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.ConflatedBroadcastChannel
 import kotlinx.coroutines.withContext
 import java.io.FileDescriptor
 import kotlin.coroutines.CoroutineContext
@@ -23,64 +21,88 @@ import kotlin.math.min
 
 
 class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
-    private val outPath: String) {
+    private val outPath: String? = null) {
 
   private val PROGRESS_UNKNOWN = -1.0
   private val PROGRESS_INTERVAL_STEPS: Long = 10
 
-  suspend fun transcodeVideo(
-      outFormatStrategy: MediaFormatStrategy, coroutineContext: CoroutineContext) {
+  suspend fun extractInfo(coroutineContext: CoroutineContext): Pair<MediaFormat?, MediaFormat?> {
     return withContext(coroutineContext) {
       val mediaExtractor = MediaExtractor()
       mediaExtractor.setDataSource(mediaFileDescriptor)
 
-      val mediaMuxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-      val duration = extractMediaMetadataInfo(mediaFileDescriptor, mediaMuxer)
+      val trackResult = MediaExtractorUtils.getFirstVideoAndAudioTrack(mediaExtractor)
+      val videoOutputFormat = trackResult.mVideoTrackFormat
+      val audioOutputFormat = trackResult.mAudioTrackFormat
+      Pair(videoOutputFormat, audioOutputFormat)
+    }
 
-      val transcoders = setupTrackTranscoders(outFormatStrategy, mediaExtractor, mediaMuxer)
+  }
 
-      runPipelines(duration, transcoders.first, transcoders.second, coroutineContext)
+  suspend fun transcodeVideo(
+      outFormatStrategy: MediaFormatStrategy,
+      coroutineContext: CoroutineContext,
+      progressChannel: ConflatedBroadcastChannel<Double>): Boolean {
+    return withContext(coroutineContext) {
+      val mediaExtractor = MediaExtractor()
+      mediaExtractor.setDataSource(mediaFileDescriptor)
 
-      try {
-        mediaMuxer.stop()
+      outPath?.let {
+        val mediaMuxer = MediaMuxer(outPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        val duration = extractVideoDuration(mediaFileDescriptor, mediaMuxer)
 
-        transcoders.first.release()
-        transcoders.second.release()
+        val transcoders = setupTrackTranscoders(outFormatStrategy, mediaExtractor, mediaMuxer)
 
-        mediaExtractor.release()
-        mediaMuxer.release()
-      } catch (ex: Exception) {
-        ex.printStackTrace()
+        runPipelines(duration, transcoders.first, transcoders.second, coroutineContext,
+            progressChannel)
+
+        try {
+          mediaMuxer.stop()
+
+          transcoders.first?.release()
+          transcoders.second?.release()
+
+          mediaExtractor.release()
+          mediaMuxer.release()
+        } catch (ex: Exception) {
+          ex.printStackTrace()
+        }
       }
+      true
     }
   }
 
-  private fun runPipelines(duration: Long,
-      videoTrackTranscoder: TrackTranscoder,
-      audioTrackTranscoder: TrackTranscoder,
-      coroutineContext: CoroutineContext) {
-    var loopCount = 0
-    if (duration <= 0) {
-      Log.d(this.javaClass.name, "Trans progress $PROGRESS_UNKNOWN")
-    }
+  private suspend fun runPipelines(duration: Long,
+      videoTrackTranscoder: TrackTranscoder?,
+      audioTrackTranscoder: TrackTranscoder?,
+      coroutineContext: CoroutineContext,
+      progressChannel: ConflatedBroadcastChannel<Double>) {
+    return withContext(coroutineContext) {
+      var loopCount = 0
+      if (duration <= 0) {
+        Log.d(this.javaClass.name, "Trans progress $PROGRESS_UNKNOWN")
+        progressChannel.send(PROGRESS_UNKNOWN)
+      }
 
-    val mBufferInfoVideo = MediaCodec.BufferInfo()
-    val mBufferInfoAudio = MediaCodec.BufferInfo()
+      val mBufferInfoVideo = MediaCodec.BufferInfo()
+      val mBufferInfoAudio = MediaCodec.BufferInfo()
 
-    while (!videoTrackTranscoder.isFinished() && !audioTrackTranscoder.isFinished() && coroutineContext[Job]?.isCancelled?.not() == true) {
+      while (videoTrackTranscoder?.isFinished() == false && audioTrackTranscoder?.isFinished() == false && coroutineContext[Job]?.isCancelled?.not() == true) {
 
-      videoTrackTranscoder.stepPipeline(mBufferInfoVideo)
-      audioTrackTranscoder.stepPipeline(mBufferInfoAudio)
+        videoTrackTranscoder?.stepPipeline(mBufferInfoVideo)
+        audioTrackTranscoder?.stepPipeline(mBufferInfoAudio)
 
-      loopCount++
+        loopCount++
 
-      if (isStillProcessing(duration, loopCount)) {
-        val videoProgress = if (videoTrackTranscoder.isFinished()) 1.0 else min(1.0,
-            videoTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
-        val audioProgress = if (audioTrackTranscoder.isFinished()) 1.0 else min(1.0,
-            audioTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
-        val progress = (videoProgress + audioProgress) / 2.0
-        Log.d(this.javaClass.name, "Trans progress $progress")
+        if (isStillProcessing(duration, loopCount)) {
+          val videoProgress = if (videoTrackTranscoder.isFinished()) 1.0 else min(1.0,
+              videoTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
+          val audioProgress = if (audioTrackTranscoder.isFinished()) 1.0 else min(1.0,
+              audioTrackTranscoder.getWrittenPresentationTimeUS().toDouble() / duration)
+          val progress = (videoProgress + audioProgress) / 2.0
+          Log.d(this.javaClass.name, "Trans progress $progress")
+          progressChannel.send(progress)
+        }
       }
     }
   }
@@ -91,7 +113,7 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
   private fun setupTrackTranscoders(
       formatStrategy: MediaFormatStrategy,
       mediaExtractor: MediaExtractor,
-      mediaMuxer: MediaMuxer): Pair<TrackTranscoder, TrackTranscoder> {
+      mediaMuxer: MediaMuxer): Pair<TrackTranscoder?, TrackTranscoder?> {
     val trackResult = MediaExtractorUtils.getFirstVideoAndAudioTrack(mediaExtractor)
 
     val videoOutputFormat = trackResult.mVideoTrackFormat?.let {
@@ -117,28 +139,29 @@ class MediaTranscoderEngine(private val mediaFileDescriptor: FileDescriptor,
     }
 
     videoTrackTranscoder.setup()
-
-    val audioTrackTranscoder = audioOutputFormat?.let {
-      AudioTrackTranscoder(mediaExtractor,
-          trackResult.mAudioTrackIndex,
-          audioOutputFormat,
-          queuedMuxer)
-    } ?: run {
-      PassThroughTrackTranscoder(mediaExtractor,
-          trackResult.mAudioTrackIndex,
-          queuedMuxer,
-          SampleInfo.SampleType.AUDIO)
-    }
-
-    audioTrackTranscoder.setup()
-
     mediaExtractor.selectTrack(trackResult.mVideoTrackIndex)
-    mediaExtractor.selectTrack(trackResult.mAudioTrackIndex)
 
-    return Pair(videoTrackTranscoder, audioTrackTranscoder)
+    if (trackResult.mAudioTrackIndex != -1) {
+      val audioTrackTranscoder = audioOutputFormat?.let {
+        AudioTrackTranscoder(mediaExtractor,
+            trackResult.mAudioTrackIndex,
+            audioOutputFormat,
+            queuedMuxer)
+      } ?: run {
+        PassThroughTrackTranscoder(mediaExtractor,
+            trackResult.mAudioTrackIndex,
+            queuedMuxer,
+            SampleInfo.SampleType.AUDIO)
+      }
+
+      audioTrackTranscoder.setup()
+      mediaExtractor.selectTrack(trackResult.mAudioTrackIndex)
+      return Pair(videoTrackTranscoder, audioTrackTranscoder)
+    }
+    return Pair(videoTrackTranscoder, null)
   }
 
-  private fun extractMediaMetadataInfo(inFd: FileDescriptor, mediaMuxer: MediaMuxer): Long {
+  private fun extractVideoDuration(inFd: FileDescriptor, mediaMuxer: MediaMuxer): Long {
     val mediaMetadataRetriever = MediaMetadataRetriever()
     mediaMetadataRetriever.setDataSource(inFd)
 

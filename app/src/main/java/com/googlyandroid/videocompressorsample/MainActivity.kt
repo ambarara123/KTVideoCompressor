@@ -4,28 +4,27 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.database.DatabaseUtils
-import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
-import android.media.MediaPlayer
+import android.media.MediaFormat
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
+import androidx.core.content.FileProvider
 import com.googlyandroid.ktvideocompressor.KTMediaTranscoder
 import com.googlyandroid.ktvideocompressor.mediaStrategy.NoOpMediaFormatStrategy
 import kotlinx.android.synthetic.main.activity_main.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.channels.consumeEach
 import java.io.File
-import java.io.FileInputStream
 
 
 class MainActivity : AppCompatActivity() {
 
-  private val job = Job()
-
-  private val transcodingJob = CoroutineScope(Dispatchers.Main + job)
+  private var job: Job? = null
+  private var transcodingJob: CoroutineScope? = null
 
   private val REQUEST_READ_STORAGE: Int = 1
 
@@ -79,7 +78,9 @@ class MainActivity : AppCompatActivity() {
           val columnIndex = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
           val videoPath = cursor.getString(columnIndex)
           displayVideoThumb(videoPath)
-          transcodeVideo(videoPath)
+
+          initTranscodingInfo(videoPath)
+
           DatabaseUtils.dumpCursor(cursor)
           cursor.close()
         }
@@ -88,43 +89,108 @@ class MainActivity : AppCompatActivity() {
 
   }
 
-  private fun displayVideoThumb(videoPath: String) {
-    val videoPath = File(videoPath)
+  private fun initTranscodingInfo(videoPath: String?) {
 
-    val mediaMetadataRetriever = MediaMetadataRetriever()
-    mediaMetadataRetriever.setDataSource(FileInputStream(videoPath).fd)
+    transcodingJob?.let {
+      it.cancel()
+    }
+    job = Job()
+    transcodingJob = CoroutineScope(Dispatchers.Main + job!!)
 
+    transcodingJob!!.launch {
+      val (videoFormat, audioFormat) = KTMediaTranscoder.videoInfoExtract(videoPath)
 
-    //Create a new Media Player
-    val mp = MediaPlayer.create(baseContext, Uri.fromFile(videoPath))
+      videoFormat?.let {
+        val width = it.getInteger(MediaFormat.KEY_WIDTH)
+        val height = it.getInteger(MediaFormat.KEY_HEIGHT)
 
-    val millis = mp.duration
-    val rev = ArrayList<Bitmap>()
+        edtHeight.setText(height.toString())
+        edtWidth.setText(width.toString())
 
-    var i = 1000000
-    while (i < millis * 1000) {
-      val bitmap = mediaMetadataRetriever.getFrameAtTime(i.toLong(),
-          MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-      rev.add(bitmap)
-      i += 1000000
-      mediathumb.setImageBitmap(bitmap)
-      break
+      }
+
+      val bitRate = audioFormat?.getInteger(MediaFormat.KEY_BIT_RATE)
+      bitRate?.let {
+        edtBitRate.setText(bitRate.toString())
+      }
     }
 
-    mp.release()
+    transcodeNow.setOnClickListener {
+      transcodeVideo(videoPath, edtWidth.text.toString(), edtHeight.text.toString(),
+          edtBitRate.text.toString())
+    }
   }
 
-  private fun transcodeVideo(videoPath: String?) {
-    transcodingJob.launch {
+  private fun displayVideoThumb(videoPath: String) {
+    val videoPath = File(videoPath)
+    mediathumb.setVideoURI(Uri.fromFile(videoPath))
+    mediathumb.start()
+    mediathumb.setOnCompletionListener {
+      it.seekTo(0)
+      it.start()
+    }
+  }
+
+  private fun transcodeVideo(videoPath: String?, width: String,
+      height: String, bitrate: String) {
+    transcodingJob?.launch {
+
+      btnStop.setOnClickListener {
+        transcodingJob?.cancel()
+      }
+
       videoPath?.let {
-        val formatStrategy = NoOpMediaFormatStrategy()
-        KTMediaTranscoder.transcodeVideo(it, createTempFile().path, formatStrategy)
+        val formatStrategy = NoOpMediaFormatStrategy(width, height, bitrate)
+        val tempFile = File(externalCacheDir, "${System.currentTimeMillis()}.mp4")
+        KTMediaTranscoder.transcodeVideo(it, tempFile.path, formatStrategy)
+        onTranscodingDone(tempFile)
+        progress.progress = 0
+      }
+    }
+    transcodingJob?.launch {
+      KTMediaTranscoder.progressChannel.consumeEach {
+        when {
+          Build.VERSION.SDK_INT >= Build.VERSION_CODES.N -> progress.setProgress(
+              it.times(100).toInt(), true)
+          else -> progress.progress = it.times(100).toInt()
+        }
       }
     }
   }
 
+  private fun onTranscodingDone(tempFile: File) {
+
+    val uri = FileProvider.getUriForFile(
+        this@MainActivity,
+        "com.googlyandroid.videocompressorsample.fileprovider",
+        tempFile)
+    videoview.setVideoURI(uri)
+    videoview.start()
+
+    videoview.setOnCompletionListener {
+      it.seekTo(0)
+      it.start()
+    }
+
+    /*//grant permision for app with package "packegeName", eg. before starting other app via intent
+   grantUriPermission(packageName, uri,
+       Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+
+   val resInfoList = packageManager.queryIntentActivities(intent,
+       PackageManager.MATCH_DEFAULT_ONLY)
+   for (resolveInfo in resInfoList) {
+     val packageName = resolveInfo.activityInfo.packageName
+     grantUriPermission(packageName, uri,
+         Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+   }
+
+   val intent = Intent(Intent.ACTION_VIEW, uri)
+   intent.setDataAndType(uri, "video/mp4")
+   startActivity(intent)*/
+  }
+
   override fun onDestroy() {
     super.onDestroy()
-    transcodingJob.cancel()
+    transcodingJob?.cancel()
   }
 }

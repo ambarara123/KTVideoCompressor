@@ -4,4 +4,9 @@
   <!-- TODO: Remove or change this placeholder text -->
   <string name="hello_blank_fragment">Hello blank fragment</string>
   <string name="pick_video">Pick Video</string>
+  <string name="video_width">Video Width</string>
+  <string name="video_height">Video Height</string>
+  <string name="video_bitrate">Bitrate</string>
+  <string name="transcode_now">Transcode Now</string>
+  <string name="stop_trans">stop trans</string>
 </resources>
